@@ -1,0 +1,405 @@
+
+<!doctype html>
+<html lang="fr">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width,initial-scale=1" />
+	<title>Retroarch Shader Editor</title>
+	<style>
+		body { margin:0; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; display:flex; height:100vh; }
+		#sidebar { width:520px; min-width:320px; max-width:50%; padding:12px; box-sizing:border-box; border-right:1px solid #ddd; overflow:auto; }
+		#main { flex:1; display:flex; flex-direction:column; }
+		textarea { width:100%; height:360px; font-family: monospace; font-size:13px; box-sizing:border-box; padding:10px; border:1px solid #ccc; border-radius:4px; resize:vertical; }
+		.controls { display:flex; gap:8px; margin:8px 0 12px 0; flex-wrap:wrap; }
+		button,input[type=file] { padding:8px 10px; font-size:13px; }
+		#canvas-wrap { position:relative; flex:1; display:flex; align-items:stretch; }
+		canvas { width:200px; height:200px; max-width: 30%; max-height: 30%; display:block;
+            /* IE, only works on <img> tags */
+            -ms-interpolation-mode: nearest-neighbor;
+            /* Firefox */
+            image-rendering: crisp-edges;
+            /* Chromium + Safari */
+            image-rendering: pixelated;
+        }
+		#error { white-space:pre-wrap; font-family:monospace; font-size:13px; color:#900; margin-top:8px; }
+		label.small { font-size:13px; color:#444; }
+		#thumb { max-width:100%; max-height:80px; display:block; margin-top:6px; }
+	</style>
+</head>
+<body>
+	<div id="sidebar">
+		<h2>Editeur GLSL</h2>
+		<label class="small">Fragment shader</label>
+		<textarea id="shader">// Exemple: échantillonne la texture importée
+#if defined(VERTEX)
+attribute vec2 TexCoord;
+varying vec4 TEX0;
+
+void main(){
+	TEX0 = vec4(TexCoord*0.5+0.5,0.0,0.0);
+	gl_Position = vec4(TexCoord,0.0,1.0);
+}
+#elif defined(FRAGMENT)
+uniform sampler2D Texture;
+varying vec4 TEX0;
+void main() {
+	FragColor = texture2D(Texture, TEX0.xy);
+}
+#endif
+</textarea>
+
+		<div class="controls">
+			<label><input id="file" type="file" accept="image/*"> Importer une image</label>
+			<button id="compile">Compiler</button>
+			<button id="reset">Reset shader</button>
+		</div>
+
+		<label class="small">Aperçu image importée</label>
+		<img id="thumb" alt="Aucune image" />
+
+		<h3>Paramètres</h3>
+		<div id="params"></div>
+
+		<div id="error"></div>
+	</div>
+
+	<div id="main">
+		<div style="padding:8px; border-bottom:1px solid #eee; display:flex; gap:10px; align-items:center;">
+			<div style="font-weight:600">Canvas GLSL</div>
+			<div style="color:#666; font-size:13px">Modifiez le shader puis cliquez sur "Compiler" (ou tapez).</div>
+		</div>
+		<div id="canvas-wrap">
+			<canvas id="glcanvas"></canvas>
+		</div>
+	</div>
+
+	<script>
+	// Simple WebGL program that compiles a fragment shader built from a template
+	const canvas = document.getElementById('glcanvas');
+	const gl = canvas.getContext('webgl');
+	const shaderEl = document.getElementById('shader');
+	const compileBtn = document.getElementById('compile');
+	const resetBtn = document.getElementById('reset');
+	const fileInput = document.getElementById('file');
+	const errorEl = document.getElementById('error');
+	const thumb = document.getElementById('thumb');
+	const paramsDiv = document.getElementById("params");
+	let shaderParams = [];
+
+	if(!gl) {
+		errorEl.textContent = 'WebGL non disponible dans ce navigateur.';
+		throw new Error('WebGL non disponible');
+	}
+
+	const vsSource = ``;
+
+	function parseParameters(src){
+		const regex = /#pragma\s+parameter\s+(\w+)\s+"([^"]+)"\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/g;
+
+		shaderParams = [];
+		paramsDiv.innerHTML = "";
+
+		let m;
+
+		while((m = regex.exec(src))){
+			if(!m) break;
+			const p = {
+				name: m[1],
+				label: m[2],
+				def: parseFloat(m[3]),
+				min: parseFloat(m[4]),
+				max: parseFloat(m[5]),
+				step: parseFloat(m[6]),
+				value: parseFloat(m[3])
+			};
+
+			console.log("Parameter found:", p);
+			shaderParams.push(p);
+
+			const label = document.createElement("label");
+			label.className = "small";
+
+			const slider = document.createElement("input");
+			slider.type = "range";
+			slider.min = p.min;
+			slider.max = p.max;
+			slider.step = p.step;
+			slider.value = p.def;
+
+			slider.oninput = e => p.value = parseFloat(e.target.value);
+
+			const value = document.createElement("span");
+			value.textContent = p.def;
+
+			slider.oninput = e=>{
+				p.value = parseFloat(e.target.value);
+				value.textContent = e.target.value;
+			};
+
+			label.textContent = p.label + " ";
+			label.appendChild(slider);
+			label.appendChild(value);
+
+			paramsDiv.appendChild(label);
+			paramsDiv.appendChild(document.createElement("br"));
+		}
+
+	}
+
+	function stripPragmas(src){
+		return src.replace(/#pragma\s+parameter[^\n]*/g, '');
+	}
+
+	function buildVertex(userCode){
+
+		let webglCode = stripPragmas(userCode);
+
+		return `
+#define VERTEX
+#define PARAMETER_UNIFORM
+
+${webglCode}
+`;
+	}
+
+	// Fragment template: provides uniforms and glue to user's mainImage
+	function buildFragment(userCode){
+		parseParameters(userCode);
+
+		// enlever les pragmas RetroArch pour GLSL
+    	let webglCode = stripPragmas(userCode);
+
+		return `
+#define FRAGMENT
+#define PARAMETER_UNIFORM
+#define FragColor gl_FragColor
+
+precision mediump float;
+
+${webglCode}
+`;
+	}
+
+	function compileShader(type, source){
+		const s = gl.createShader(type);
+		gl.shaderSource(s, source);
+		gl.compileShader(s);
+		const ok = gl.getShaderParameter(s, gl.COMPILE_STATUS);
+		if(!ok){
+			const log = gl.getShaderInfoLog(s);
+			gl.deleteShader(s);
+			throw new Error(log);
+		}
+		return s;
+	}
+
+	let program = null;
+	let attribs = {};
+	let uniforms = {};
+	let tex = null;
+
+	function createProgram(vsSource, fsSource){
+		const vs = compileShader(gl.VERTEX_SHADER, vsSource);
+		const fs = compileShader(gl.FRAGMENT_SHADER, fsSource);
+		const p = gl.createProgram();
+		gl.attachShader(p, vs);
+		gl.attachShader(p, fs);
+		gl.bindAttribLocation(p, 0, 'VertexCoord');
+		gl.bindAttribLocation(p, 1, 'TexCoord');
+		gl.linkProgram(p);
+		if(!gl.getProgramParameter(p, gl.LINK_STATUS)){
+			const log = gl.getProgramInfoLog(p);
+			gl.deleteProgram(p);
+			throw new Error(log);
+		}
+		return p;
+	}
+
+	const vertices = new Float32Array([
+		-1,-1, 0,0,
+		1,-1, 1,0,
+		-1, 1, 0,1,
+		1, 1, 1,1
+	]);
+	// Fullscreen triangle buffer
+	const buffer = gl.createBuffer();
+	gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+	gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+	function useProgram(p){
+		program = p;
+		gl.useProgram(program);
+		attribs.VertexCoord = gl.getAttribLocation(program, "VertexCoord");
+		attribs.TexCoord = gl.getAttribLocation(program, "TexCoord");
+		uniforms.MVPMatrix = gl.getUniformLocation(program,'MVPMatrix');
+		uniforms.TextureSize = gl.getUniformLocation(program,'TextureSize');
+		uniforms.InputSize = gl.getUniformLocation(program,'InputSize');
+		uniforms.OutputSize = gl.getUniformLocation(program,'OutputSize');
+		uniforms.Texture = gl.getUniformLocation(program, 'Texture');
+		shaderParams.forEach(p=>{
+			uniforms[p.name] = gl.getUniformLocation(program,p.name);
+		});
+	}
+
+	function setDefaultTexture(){
+		const data = new Uint8Array([128,128,255,255]);
+		tex = gl.createTexture();
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,data);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+	}
+
+	setDefaultTexture();
+
+	let textureWidth = canvas.width;
+	let textureHeight = canvas.height;
+
+	function updateTextureFromImage(img){
+		function isPowerOfTwo(v){ return (v & (v - 1)) === 0; }
+		if(!tex) tex = gl.createTexture();
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+		if(isPowerOfTwo(img.width) && isPowerOfTwo(img.height)){
+			gl.generateMipmap(gl.TEXTURE_2D);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+		}else{
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		}
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+		thumb.src = img.src;
+
+		textureWidth = img.width;
+		textureHeight = img.height;
+
+		// Ensure the canvas CSS width is at least 10× the uploaded image width (accounting for DPR)
+		try{
+			const dpr = window.devicePixelRatio || 1;
+			const minCssWidth = (img.width * 10) / dpr;
+			canvas.style.minWidth = Math.max(parseFloat(getComputedStyle(canvas).minWidth) || 0, minCssWidth) + 'px';
+			canvas.style.minHeight = Math.max(parseFloat(getComputedStyle(canvas).minHeight) || 0, minCssWidth) + 'px';
+			// Update internal drawing buffer size to reflect the new CSS constraints
+			resize();
+		}catch(e){ console.warn('Failed to adjust canvas minWidth for uploaded image', e); }
+	}
+
+	// Compile initial shader
+	function compileAndUse(){
+		try{
+			errorEl.textContent = '';
+			const vsSrc = buildVertex(shaderEl.value);
+			const fsSrc = buildFragment(shaderEl.value);
+
+			const p = createProgram(vsSrc, fsSrc);
+			useProgram(p);
+			// bind attributes
+			gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+			gl.enableVertexAttribArray(attribs.VertexCoord);
+			gl.vertexAttribPointer(attribs.VertexCoord, 2, gl.FLOAT, false, 16, 0);
+			gl.enableVertexAttribArray(attribs.TexCoord);
+			gl.vertexAttribPointer(attribs.TexCoord, 2, gl.FLOAT, false, 16, 8);
+			// set texture unit
+			gl.activeTexture(gl.TEXTURE0);
+			gl.bindTexture(gl.TEXTURE_2D, tex);
+			gl.uniform1i(uniforms.Texture, 0);
+		}catch(e){
+			errorEl.textContent = 'Compilation/Link error:\n' + e.message;
+			console.error(e);
+		}
+	}
+
+	// Resize canvas to display size
+	function resize(){
+		const dpr = window.devicePixelRatio || 1;
+		const width = canvas.clientWidth * dpr | 0;
+		const height = canvas.clientHeight * dpr | 0;
+		if(canvas.width !== width || canvas.height !== height){
+			canvas.width = width;
+			canvas.height = height;
+			gl.viewport(0,0,canvas.width,canvas.height);
+		}
+	}
+
+	let start = performance.now();
+	let mouse = [0,0];
+
+	function render(){
+		resize();
+		if(!program) requestAnimationFrame(render);
+		gl.clearColor(0,0,0,1);
+		gl.clear(gl.COLOR_BUFFER_BIT);
+		const t = (performance.now() - start)/1000;
+		gl.useProgram(program);
+
+		const MVPMatrix = new Float32Array([
+			1,0,0,0,
+			0,1,0,0,
+			0,0,1,0,
+			0,0,0,1
+		]);
+
+		gl.uniformMatrix4fv(uniforms.MVPMatrix, false, MVPMatrix);
+		gl.uniform2f(uniforms.OutputSize, canvas.width, canvas.height);
+		gl.uniform2f(uniforms.TextureSize, textureWidth, textureHeight);
+		gl.uniform2f(uniforms.InputSize, canvas.width, canvas.height);
+		shaderParams.forEach(p=>{
+			if(uniforms[p.name])
+				gl.uniform1f(uniforms[p.name], p.value);
+		});
+		gl.activeTexture(gl.TEXTURE0);
+		gl.bindTexture(gl.TEXTURE_2D, tex);
+		gl.uniform1i(uniforms.Texture, 0);
+		gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+		requestAnimationFrame(render);
+	}
+
+	// Hook UI
+	compileBtn.addEventListener('click', ()=>{ compileAndUse(); if(program) { start = performance.now(); requestAnimationFrame(render); } });
+	resetBtn.addEventListener('click', ()=>{ shaderEl.value = `// Exemple: échantillonne la texture importée\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n  vec2 uv = fragCoord / OutputSize;\n  vec4 t = texture2D(Texture, uv);\n  vec3 col = 0.5 + 0.5*cos(InputSize.xyx + vec3(0,2,4));\n  fragColor = mix(vec4(col,1.0), t, 0.6);\n}`; compileAndUse(); });
+
+	// Live compile on typing with debounce
+	let typingTimer = null;
+	shaderEl.addEventListener('input', ()=>{
+		clearTimeout(typingTimer);
+		typingTimer = setTimeout(()=>{ compileAndUse(); }, 700);
+	});
+
+	// Drag/drop + file input
+	fileInput.addEventListener('change', (e)=>{
+		const f = e.target.files[0];
+		if(!f) return;
+		const url = URL.createObjectURL(f);
+		const img = new Image();
+		img.onload = ()=>{ updateTextureFromImage(img); URL.revokeObjectURL(url); };
+		img.src = url;
+	});
+
+	// Mouse tracking (canvas coordinates)
+	canvas.addEventListener('mousemove', (e)=>{
+		const rect = canvas.getBoundingClientRect();
+		const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+		const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+		mouse = [x, y];
+	});
+
+	// Initial compile & render
+	try{ compileAndUse(); start = performance.now(); requestAnimationFrame(render); }catch(e){ console.error(e); }
+
+	// Make canvas fill the remaining space
+	function fit(){
+		const wrap = document.getElementById('canvas-wrap');
+		canvas.style.width = '100%';
+		canvas.style.height = '100%';
+		resize();
+	}
+	window.addEventListener('resize', fit);
+	fit();
+	</script>
+</body>
+</html>
