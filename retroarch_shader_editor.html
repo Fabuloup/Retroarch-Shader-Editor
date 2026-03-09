@@ -36,8 +36,8 @@ attribute vec2 TexCoord;
 varying vec4 TEX0;
 
 void main(){
-	TEX0 = vec4(TexCoord*0.5+0.5,0.0,0.0);
-	gl_Position = vec4(TexCoord,0.0,1.0);
+	TEX0 = vec4(TexCoord,0.0,0.0);
+	gl_Position = vec4(TexCoord*2.0-1.0,0.0,1.0);
 }
 #elif defined(FRAGMENT)
 uniform sampler2D Texture;
